@@ -1672,6 +1672,11 @@ class TelegramAdapter(BasePlatformAdapter):
                     logger.error("Failed to resolve gateway approval from Telegram button: %s", exc)
             return
 
+        # --- SIA-PENDING-AUDIT audit callbacks (audit:<hash>:<answer>) ---
+        if data.startswith("audit:"):
+            await self._handle_audit_callback(query, data)
+            return
+
         # --- Update prompt callbacks ---
         if not data.startswith("update_prompt:"):
             return
@@ -1718,6 +1723,73 @@ class TelegramAdapter(BasePlatformAdapter):
                 "path in MEDIA: for gateway file delivery.)"
             )
         return error
+
+    async def _handle_audit_callback(self, query: Any, data: str) -> None:
+        """Handle SIA-PENDING-AUDIT inline keyboard callbacks.
+
+        callback_data format: audit:<line_hash>:<answer>
+        answer: yes | no | later
+
+        Publishes telegram_callback_result to NATS → SIA-PENDING-AUDIT.
+        Edits original message to remove buttons.
+        """
+        parts = data.split(":", 2)
+        if len(parts) != 3:
+            await query.answer(text="Formato de callback inválido.")
+            return
+
+        _, line_hash, answer = parts
+        if answer not in ("yes", "no", "later"):
+            await query.answer(text="Respuesta no reconocida.")
+            return
+
+        label_map = {
+            "yes": "✅ Sí — marcado como listo",
+            "no": "❌ No — sigue pendiente",
+            "later": "⏸ Más tarde",
+        }
+        user_display = getattr(query.from_user, "first_name", "Juan")
+        label = label_map[answer]
+        await query.answer(text=label)
+
+        # Remove buttons from original message
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass  # non-fatal
+
+        # Publish callback result to NATS
+        answered_at = __import__("datetime").datetime.now(
+            __import__("datetime").timezone.utc
+        ).isoformat()
+        try:
+            import sys as _sys
+            _scripts = "/app/scripts"
+            if _scripts not in _sys.path:
+                _sys.path.insert(0, _scripts)
+            from nats_bus import publish as _nats_publish  # type: ignore[import]
+            import asyncio as _asyncio
+            task_payload = {
+                "line_hash": line_hash,
+                "answer": answer,
+                "answered_by": user_display,
+                "answered_at": answered_at,
+            }
+            _asyncio.ensure_future(
+                _nats_publish(
+                    body=f"[HERMES] audit_callback {line_hash[:12]}:{answer}",
+                    to="SIA-PENDING-AUDIT",
+                    task_id=f"callback-{line_hash[:12]}",
+                    task_type="telegram_callback_result",
+                    task_payload=task_payload,
+                )
+            )
+            logger.info(
+                "audit_callback published hash=%s answer=%s user=%s",
+                line_hash[:12], answer, user_display,
+            )
+        except Exception as exc:
+            logger.error("Failed to publish audit callback to NATS: %s", exc)
 
     async def send_voice(
         self,
