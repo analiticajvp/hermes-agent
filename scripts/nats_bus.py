@@ -416,3 +416,40 @@ async def close() -> None:
         await _client.drain()
         _client = None
         log.info("NATS connection closed")
+
+
+async def startup_probe(timeout_s: float = 5.0) -> dict[str, Any]:
+    """Eager NATS connection probe. Non-blocking failure (degraded mode).
+
+    Returns dict with: status (ok|degraded), url (if ok), latency_ms (if ok),
+    attempts (list of url+error), error (if degraded).
+    """
+    start = time.monotonic()
+    attempts: list[dict[str, Any]] = []
+    for candidate in _candidate_nats_urls():
+        try:
+            client = await asyncio.wait_for(
+                nats.connect(candidate, max_reconnect_attempts=0),
+                timeout=timeout_s,
+            )
+            latency_ms = int((time.monotonic() - start) * 1000)
+            await client.drain()
+            log.info(
+                "NATS startup probe OK: url=%s latency_ms=%d",
+                candidate,
+                latency_ms,
+            )
+            return {
+                "status": "ok",
+                "url": candidate,
+                "latency_ms": latency_ms,
+                "attempts": attempts,
+            }
+        except (asyncio.TimeoutError, Exception) as exc:
+            attempts.append({"url": candidate, "error": str(exc)[:120]})
+    log.warning(
+        "NATS startup probe FAILED all candidates — degraded mode. Attempts: %s",
+        attempts,
+    )
+    return {"status": "degraded", "attempts": attempts}
+

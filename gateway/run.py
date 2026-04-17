@@ -7543,6 +7543,19 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
         except NotImplementedError:
             pass
     
+    # Eager NATS startup probe — non-blocking, continues in degraded mode
+    try:
+        from scripts.nats_bus import startup_probe
+        _probe_result = await startup_probe()
+        if _probe_result["status"] == "degraded":
+            logger.warning(
+                "Starting in degraded mode — NATS unreachable at startup. "
+                "Attempts: %s",
+                _probe_result.get("attempts"),
+            )
+    except Exception as _probe_exc:
+        logger.warning("startup_probe() raised unexpectedly (non-fatal): %s", _probe_exc)
+
     # Start the gateway
     success = await runner.start()
     if not success:
