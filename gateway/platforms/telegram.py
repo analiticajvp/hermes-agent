@@ -1510,7 +1510,7 @@ class TelegramAdapter(BasePlatformAdapter):
         ).isoformat()
         try:
             import sys as _sys
-            _scripts = "/app/scripts"
+            _scripts = "/opt/hermes/scripts"
             if _scripts not in _sys.path:
                 _sys.path.insert(0, _scripts)
             from nats_bus import publish as _nats_publish  # type: ignore[import]
