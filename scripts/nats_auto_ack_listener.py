@@ -18,8 +18,12 @@ from typing import Any
 from urllib.parse import urlparse
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
+_SCRIPTS_DIR = REPO_ROOT / "scripts"
+# Insert scripts/ BEFORE repo root so canonical nats_bus.py in scripts/
+# takes precedence over any legacy hot-patch at /opt/hermes/nats_bus.py.
+for _p in (str(_SCRIPTS_DIR), str(REPO_ROOT)):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 from nats_bus import NATS_URL, publish, should_auto_ack, start_listener
 

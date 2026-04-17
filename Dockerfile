@@ -3,10 +3,14 @@ FROM debian:13.4
 # Install system dependencies in one layer, clear APT cache
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        build-essential nodejs npm python3 python3-pip ripgrep ffmpeg gcc python3-dev libffi-dev && \
+        build-essential nodejs npm python3 python3-pip ripgrep ffmpeg gcc python3-dev libffi-dev openssh-client && \
     rm -rf /var/lib/apt/lists/*
 
 COPY . /opt/hermes
+# Prevent legacy hot-patch at /opt/hermes/nats_bus.py from shadowing
+# the canonical scripts/nats_bus.py. Any deploy that tries to hot-patch
+# here will be wiped on rebuild.
+RUN rm -f /opt/hermes/nats_bus.py
 WORKDIR /opt/hermes
 
 # Install Python and Node dependencies in one layer, no cache

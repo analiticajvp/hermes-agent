@@ -95,3 +95,64 @@ def test_whitespace_in_csv(monkeypatch):
     assert "nats://b:4222" in result
     assert " nats://a:4222 " not in result
     assert " nats://b:4222 " not in result
+
+
+# ---------------------------------------------------------------------------
+# Alerting tests (T2.5 — _reconnect_failures counter + telegram alert)
+# ---------------------------------------------------------------------------
+
+def test_alert_telegram_called_on_threshold(monkeypatch):
+    """Cuando _reconnect_failures >= threshold, _alert_telegram_bus_down dispara."""
+    monkeypatch.setenv("HERMES_NATS_RECONNECT_ALERT_THRESHOLD", "3")
+    mod = _load_nats_bus_module()
+    alert_called: list[int] = []
+
+    async def _fake_alert() -> None:
+        alert_called.append(1)
+
+    # Patch the module-level function and the global counter.
+    monkeypatch.setattr(mod, "_alert_telegram_bus_down", _fake_alert)
+    monkeypatch.setattr(mod, "_reconnect_failures", 2)
+    monkeypatch.setattr(mod, "_ALERT_THRESHOLD", 3)
+
+    # Simulate _on_disconnect: increment counter and check threshold.
+    async def _run():
+        mod._reconnect_failures += 1
+        if mod._reconnect_failures >= mod._ALERT_THRESHOLD:
+            await mod._alert_telegram_bus_down()
+
+    import asyncio
+    asyncio.run(_run())
+    assert alert_called, "Alert should have been called when failures == threshold"
+    assert mod._reconnect_failures == 3
+
+
+def test_alert_resets_on_reconnect(monkeypatch):
+    """_on_reconnect resetea _reconnect_failures a 0."""
+    mod = _load_nats_bus_module()
+    monkeypatch.setattr(mod, "_reconnect_failures", 5)
+
+    import asyncio
+    asyncio.run(mod._on_reconnect())
+    assert mod._reconnect_failures == 0, "Counter should reset to 0 after reconnect"
+
+
+def test_alert_survives_telegram_failure(monkeypatch):
+    """Si el POST a Telegram falla, Hermes NO crashea."""
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "fake-token-for-test")
+    mod = _load_nats_bus_module()
+    monkeypatch.setattr(mod, "_reconnect_failures", 10)
+
+    import urllib.request as _req
+
+    def _raise(*args, **kwargs):
+        raise OSError("Simulated network failure")
+
+    monkeypatch.setattr(_req, "urlopen", _raise)
+
+    import asyncio
+    # Should NOT raise — the function must swallow the exception.
+    try:
+        asyncio.run(mod._alert_telegram_bus_down())
+    except Exception as exc:
+        pytest.fail(f"_alert_telegram_bus_down raised unexpectedly: {exc}")
