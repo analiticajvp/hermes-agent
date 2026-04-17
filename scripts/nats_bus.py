@@ -46,14 +46,23 @@ MAX_BODY_CHARS: int = int(os.environ.get("HERMES_NATS_MAX_BODY_CHARS", "1200"))
 DEFAULT_WAIT_TIMEOUT_S: float = float(os.environ.get("HERMES_NATS_WAIT_TIMEOUT_S", "15"))
 
 _client: NatsClient | None = None
+_reconnect_failures: int = 0
+_ALERT_THRESHOLD: int = int(os.environ.get("HERMES_NATS_RECONNECT_ALERT_THRESHOLD", "5"))
 
 
 def _candidate_nats_urls() -> list[str]:
     raw = os.environ.get("NATS_URL", "").strip()
-    if raw:
-        values = [item.strip() for item in raw.split(",") if item.strip()]
-        return values or [raw]
-    return list(DEFAULT_NATS_URLS)
+    strict = os.environ.get("NATS_STRICT", "").strip() == "1"
+    explicit = [item.strip() for item in raw.split(",") if item.strip()] if raw else []
+    if strict and explicit:
+        return explicit
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for url in [*explicit, *DEFAULT_NATS_URLS]:
+        if url and url not in seen:
+            seen.add(url)
+            ordered.append(url)
+    return ordered
 
 
 async def _connect_first_available() -> tuple[NatsClient, str]:
@@ -87,16 +96,46 @@ async def _get_client() -> NatsClient:
     return _client
 
 
+async def _alert_telegram_bus_down() -> None:
+    """Send Telegram alert via Bot API — bypasses NATS intentionally."""
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    chat_id = os.environ.get("HERMES_NATS_ALERT_CHAT_ID", "8386273656")
+    if not token:
+        log.warning("HERMES_NATS_ALERT: TELEGRAM_BOT_TOKEN not set, skipping alert")
+        return
+    api_url = f"https://api.telegram.org/bot{token}/sendMessage"
+    text = (
+        f"❗ Hermes NATS bus down — {_reconnect_failures} fallos consecutivos. "
+        f"URLs: {_candidate_nats_urls()}"
+    )
+    try:
+        import urllib.request as _req
+        import json as _json
+        data = _json.dumps({"chat_id": chat_id, "text": text}).encode()
+        with _req.urlopen(_req.Request(api_url, data=data, headers={"Content-Type": "application/json"}), timeout=5):
+            pass
+        log.info("Telegram NATS alert sent to chat_id=%s", chat_id)
+    except Exception as exc:
+        log.error("Telegram NATS alert FAILED (non-fatal): %s", exc)
+
+
 async def _on_error(exc: Exception) -> None:
     log.error("NATS error: %s", exc)
 
 
 async def _on_disconnect() -> None:
-    log.warning("NATS disconnected, will reconnect")
+    global _reconnect_failures
+    _reconnect_failures += 1
+    log.warning("NATS disconnected (consecutive_failures=%d)", _reconnect_failures)
+    if _reconnect_failures >= _ALERT_THRESHOLD:
+        await _alert_telegram_bus_down()
 
 
 async def _on_reconnect() -> None:
-    log.info("NATS reconnected")
+    global _reconnect_failures
+    if _reconnect_failures > 0:
+        log.info("NATS reconnected after %d consecutive failures", _reconnect_failures)
+    _reconnect_failures = 0
 
 
 def _validate_publish_request(
