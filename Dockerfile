@@ -20,7 +20,6 @@ RUN useradd -u 10000 -m -d /opt/data hermes
 
 COPY --chmod=0755 --from=gosu_source /gosu /usr/local/bin/
 COPY --chmod=0755 --from=uv_source /usr/local/bin/uv /usr/local/bin/uvx /usr/local/bin/
-
 WORKDIR /opt/hermes
 
 # ---------- Layer-cached dependency install ----------
@@ -37,6 +36,11 @@ RUN npm install --prefer-offline --no-audit && \
 # ---------- Source code ----------
 # .dockerignore excludes node_modules, so the installs above survive.
 COPY --chown=hermes:hermes . .
+
+# Prevent legacy hot-patch at /opt/hermes/nats_bus.py from shadowing
+# the canonical scripts/nats_bus.py. Any deploy that tries to hot-patch
+# here will be wiped on rebuild.
+RUN rm -f /opt/hermes/nats_bus.py
 
 # Build web dashboard (Vite outputs to hermes_cli/web_dist/)
 RUN cd web && npm run build
