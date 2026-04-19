@@ -135,7 +135,13 @@ OVH_CHECK_COMMAND = os.environ.get(
     "OVH_CHECK_COMMAND",
     f"ssh -o BatchMode=yes -o ConnectTimeout=8 {shlex.quote(OVH_SSH_TARGET)} 'echo ovh-ok'",
 )
-SUPPORTED_TASK_TYPES = {"check_ovh", "request_feedback", "execute_task", "model_review", "list_task_bus"}
+SUPPORTED_TASK_TYPES = {"check_ovh", "request_feedback", "execute_task", "model_review", "list_task_bus", "check_self_status"}
+SELF_STATUS_TOKENS = (
+    "tu estatus", "estatus propio", "estatus operativo",
+    "tu estado", "estado propio", "operativo",
+    "heartbeat", "uptime", "health",
+    "tu status", "status propio", "your status",
+)
 TASK_BUS_TOKENS = ("task-bus", "taskbus", "pendientes", "tareas pendientes",
                    "que tareas", "qué tareas", "tasks pending")
 OVH_CHECK_TOKENS = ("verific", "conect", "conexion", "connect", "check")
@@ -216,6 +222,12 @@ def _contains_ovh_check_request(text: str) -> bool:
 
 
 
+def _self_status_rule_matches(text: str) -> bool:
+    if _task_bus_rule_matches(text):
+        return False  # task-bus wins; don't shadow it
+    return any(token in text for token in SELF_STATUS_TOKENS)
+
+
 def _task_bus_rule_matches(text: str) -> bool:
     return any(token in text for token in TASK_BUS_TOKENS)
 
@@ -238,6 +250,8 @@ def _action_from_intent(text: str, intent: str | None) -> str | None:
             return "model_review"
         case "feedback":
             return "request_feedback"
+        case "check" if _self_status_rule_matches(text):
+            return "check_self_status"
         case "check" if _task_bus_rule_matches(text):
             return "list_task_bus"
         case "check" if "ovh" in text:
@@ -253,6 +267,8 @@ def detect_action(body: str, task_id: str | None = None, intent: str | None = No
     intent_action = _action_from_intent(text, intent)
     if intent_action is not None:
         return intent_action
+    if _self_status_rule_matches(text):
+        return "check_self_status"
     if _task_bus_rule_matches(text):
         return "list_task_bus"
     if _contains_ovh_check_request(text):
@@ -457,6 +473,31 @@ def _run_ovh_check_command() -> str:
     return _ovh_result_from_command(_try_shell_command(OVH_CHECK_COMMAND, 12))
 
 
+def _run_self_status() -> str:
+    """Hardcoded listener self-status. No LLM call. Instant response."""
+    import datetime
+    import os
+    import socket
+    host = socket.gethostname()
+    pid = os.getpid()
+    subject = os.environ.get("NATS_SUBJECT", "agent.bus")
+    url = os.environ.get("NATS_URL", "unknown")
+    js_flag = os.environ.get("NATS_JETSTREAM_ENABLED", "0") == "1"
+    self_name = os.environ.get("NATS_SELF", "HERMES")
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat(
+        timespec="seconds"
+    )
+    lines = [
+        f"[RESULT] Estado {self_name}: operativo.",
+        f"Host={host} | PID={pid}",
+        f"Bus={url} subject={subject} jetstream={js_flag}",
+        "Listener responde: check_self_status, check_ovh, "
+        "list_task_bus, request_feedback, execute_task, model_review.",
+        f"Timestamp={now}",
+    ]
+    return " ".join(lines)
+
+
 def _run_model_review_action(body: str, from_agent: str | None, task_id: str | None) -> str:
     if not _has_audit_context(body):
         return _missing_audit_context_result()
@@ -500,6 +541,8 @@ def run_action(
             return _run_execute_task_action(body, from_agent, task_id)
         case "check_ovh":
             return _run_ovh_check_command()
+        case "check_self_status":
+            return _run_self_status()
         case "list_task_bus":
             return _read_and_summarize()
         case _:
