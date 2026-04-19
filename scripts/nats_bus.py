@@ -37,7 +37,7 @@ DEFAULT_NATS_URLS: tuple[str, ...] = (
     "nats://localhost:4222",
 )
 NATS_URL: str = os.environ.get("NATS_URL", DEFAULT_NATS_URLS[0])
-SELF_NAME: str = os.environ.get("NATS_SELF", "HERMES_LOCAL_DISABLED")
+SELF_NAME: str = os.environ.get("NATS_SELF", "HERMES")
 SUBJECT: str = os.environ.get("NATS_SUBJECT", "agent.bus")
 PEER_ALLOWLIST: set[str] = {
     peer.strip() for peer in os.environ.get("HERMES_NATS_PEER_ALLOWLIST", "PI,HALL9000,HAL9000").split(",") if peer.strip()
