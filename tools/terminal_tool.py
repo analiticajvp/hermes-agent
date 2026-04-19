@@ -1603,7 +1603,21 @@ TERMINAL_SCHEMA = {
 }
 
 
+def _bus_guard_reject(command):
+    """Reuse the execute_code guard to cover terminal heredocs too."""
+    from tools.code_execution_tool import _check_bus_publish_pattern
+    return _check_bus_publish_pattern(command or "")
+
+
 def _handle_terminal(args, **kw):
+    _cmd = args.get("command") or ""
+    _bus_err = _bus_guard_reject(_cmd)
+    if _bus_err is not None:
+        import logging as _lg
+        _lg.getLogger(__name__).warning("terminal blocked by bus-publish guard")
+        from tools.registry import tool_error as _te
+        return _te(_bus_err)
+
     return terminal_tool(
         command=args.get("command"),
         background=args.get("background", False),

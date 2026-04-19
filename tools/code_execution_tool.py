@@ -863,6 +863,40 @@ def _execute_remote(
 # Main entry point
 # ---------------------------------------------------------------------------
 
+
+
+# --- Bus-publish guard (SDD: agent-telegram-relay) ------------------------
+# HAL's schema validator drops legacy envelopes ({type, from, to, body}).
+# The send_bus_message tool is the only supported path to agent.bus.
+# Reject execute_code scripts that try to shortcut it.
+import re as _re_bus_guard
+
+_BUS_LEGACY_PATTERNS = [
+    _re_bus_guard.compile(r'"type"\s*:\s*"message"'),
+    _re_bus_guard.compile(r'nc\s*\.\s*publish\s*\(\s*["\']agent\.bus'),
+    _re_bus_guard.compile(r'js\s*\.\s*publish\s*\(\s*["\']agent\.bus'),
+    _re_bus_guard.compile(r'["\'](?:CODEX|HERMES-VPS)["\']'),
+]
+
+
+def _check_bus_publish_pattern(code: str):
+    for rx in _BUS_LEGACY_PATTERNS:
+        m = rx.search(code)
+        if m:
+            start = max(0, m.start() - 30)
+            snippet = code[start:m.end() + 30]
+            return (
+                "Code rejected by bus-publish guard: matched "
+                f"pattern {m.re.pattern!r} near {snippet!r}. "
+                "Direct publishes to agent.bus with hand-built envelopes "
+                "are forbidden — HAL's schema validator drops the legacy "
+                "shape. Use the send_bus_message tool instead: "
+                "send_bus_message(to='HALL9000', body='...', task_id='...'). "
+                "Valid peers: HALL9000, PI, HERMES, ALL. NOT CODEX, NOT HERMES-VPS."
+            )
+    return None
+# --- end bus-publish guard ------------------------------------------------
+
 def execute_code(
     code: str,
     task_id: Optional[str] = None,
@@ -891,6 +925,11 @@ def execute_code(
 
     if not code or not code.strip():
         return tool_error("No code provided.")
+
+    _bus_err = _check_bus_publish_pattern(code)
+    if _bus_err is not None:
+        logger.warning("execute_code blocked by bus-publish guard")
+        return tool_error(_bus_err)
 
     # Dispatch: remote backends use file-based RPC, local uses UDS
     from tools.terminal_tool import _get_env_config
