@@ -28,6 +28,13 @@ for _p in (str(_SCRIPTS_DIR), str(REPO_ROOT)):
 from nats_bus import NATS_URL, publish, should_auto_ack, start_listener
 
 try:
+    from task_bus_reader import read_and_summarize as _read_and_summarize
+except ImportError:  # pragma: no cover - fallback if module missing
+    def _read_and_summarize(*_args: object, **_kwargs: object) -> str:
+        return "[RESULT] Task-bus UNAVAILABLE: task_bus_reader module not found."
+
+
+try:
     from hal.nats_heartbeat import publish_step
 except ImportError:  # pragma: no cover - VPS/container fallback
     async def publish_step(subject: str, agent: str, doing: str, extra: dict[str, Any] | None = None) -> None:
@@ -128,7 +135,9 @@ OVH_CHECK_COMMAND = os.environ.get(
     "OVH_CHECK_COMMAND",
     f"ssh -o BatchMode=yes -o ConnectTimeout=8 {shlex.quote(OVH_SSH_TARGET)} 'echo ovh-ok'",
 )
-SUPPORTED_TASK_TYPES = {"check_ovh", "request_feedback", "execute_task", "model_review"}
+SUPPORTED_TASK_TYPES = {"check_ovh", "request_feedback", "execute_task", "model_review", "list_task_bus"}
+TASK_BUS_TOKENS = ("task-bus", "taskbus", "pendientes", "tareas pendientes",
+                   "que tareas", "qué tareas", "tasks pending")
 OVH_CHECK_TOKENS = ("verific", "conect", "conexion", "connect", "check")
 FEEDBACK_TOKENS = ("feedback", "opini", "review", "revisá", "revisa", "revisión", "revision")
 AUDIT_TOKENS = (
@@ -206,6 +215,11 @@ def _contains_ovh_check_request(text: str) -> bool:
     return "ovh" in lowered and any(token in lowered for token in OVH_CHECK_TOKENS)
 
 
+
+def _task_bus_rule_matches(text: str) -> bool:
+    return any(token in text for token in TASK_BUS_TOKENS)
+
+
 def _audit_rule_matches(text: str, task_id: str | None) -> bool:
     task_id_text = (task_id or "").lower()
     return any(token in text for token in AUDIT_TOKENS) or task_id_text.startswith("audit-") or "audit" in task_id_text or "reaudit" in task_id_text
@@ -224,6 +238,8 @@ def _action_from_intent(text: str, intent: str | None) -> str | None:
             return "model_review"
         case "feedback":
             return "request_feedback"
+        case "check" if _task_bus_rule_matches(text):
+            return "list_task_bus"
         case "check" if "ovh" in text:
             return "check_ovh"
         case "task":
@@ -237,6 +253,8 @@ def detect_action(body: str, task_id: str | None = None, intent: str | None = No
     intent_action = _action_from_intent(text, intent)
     if intent_action is not None:
         return intent_action
+    if _task_bus_rule_matches(text):
+        return "list_task_bus"
     if _contains_ovh_check_request(text):
         return "check_ovh"
     if _audit_rule_matches(text, task_id):
@@ -482,6 +500,8 @@ def run_action(
             return _run_execute_task_action(body, from_agent, task_id)
         case "check_ovh":
             return _run_ovh_check_command()
+        case "list_task_bus":
+            return _read_and_summarize()
         case _:
             return "[RESULT] Tarea no soportada por executor Hermes."
 
