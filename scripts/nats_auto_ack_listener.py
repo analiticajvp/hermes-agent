@@ -223,13 +223,20 @@ def _contains_ovh_check_request(text: str) -> bool:
 
 
 def _self_status_rule_matches(text: str) -> bool:
-    if _task_bus_rule_matches(text):
-        return False  # task-bus wins; don't shadow it
     return any(token in text for token in SELF_STATUS_TOKENS)
 
 
 def _task_bus_rule_matches(text: str) -> bool:
-    return any(token in text for token in TASK_BUS_TOKENS)
+    neg_prefixes = ("no ", "sin ", "salvo ", "excepto ", "aparte de ")
+    for token in TASK_BUS_TOKENS:
+        idx = text.find(token)
+        if idx == -1:
+            continue
+        window = text[max(0, idx - 20):idx]
+        if any(neg in window for neg in neg_prefixes):
+            continue
+        return True
+    return False
 
 
 def _audit_rule_matches(text: str, task_id: str | None) -> bool:
