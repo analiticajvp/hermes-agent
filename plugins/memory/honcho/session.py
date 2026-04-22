@@ -104,6 +104,16 @@ class HonchoSessionManager:
         self._context_cache: dict[str, dict] = {}
         self._dialectic_cache: dict[str, str] = {}
         self._prefetch_cache_lock = threading.Lock()
+
+        # Dialectic health tracking (Gap 3 — degraded mode visibility).
+        # Count consecutive failures; reset on success. Exposed via
+        # dialectic_health() so monitoring (NATS heartbeat, dashboards)
+        # can detect silent degradation instead of discovering it
+        # via blank responses.
+        self._dialectic_failure_count: int = 0
+        self._dialectic_last_failure: dict[str, Any] | None = None
+        self._dialectic_last_success_at: str | None = None
+        self._dialectic_escalation_threshold: int = 3
         self._dialectic_reasoning_level: str = (
             config.dialectic_reasoning_level if config else "low"
         )
@@ -571,6 +581,8 @@ class HonchoSessionManager:
             # Apply Hermes-side char cap before caching
             if result and self._dialectic_max_chars and len(result) > self._dialectic_max_chars:
                 result = result[:self._dialectic_max_chars].rsplit(" ", 1)[0] + " …"
+            # Gap 3: mark healthy on any successful return (even empty string).
+            self._record_dialectic_success()
             return result
         except Exception as e:
             # Surface HTTP status + body when the SDK exposes them.
@@ -580,18 +592,68 @@ class HonchoSessionManager:
             status = getattr(response, "status_code", None)
             body = getattr(response, "text", None)
             if status is not None:
-                logger.warning(
-                    "Honcho dialectic query failed: HTTP %s — %s",
-                    status,
-                    (body or "")[:300],
-                )
+                detail = f"HTTP {status}: {(body or '')[:300]}"
+                logger.warning("Honcho dialectic query failed: %s", detail)
             else:
+                detail = f"{type(e).__name__}: {e}"
                 logger.exception(
-                    "Honcho dialectic query failed (unhandled): %s (%s)",
-                    e,
-                    type(e).__name__,
+                    "Honcho dialectic query failed (unhandled): %s",
+                    detail,
                 )
+            # Gap 3: track for degraded-mode visibility.
+            self._record_dialectic_failure(status=status, detail=detail)
             return ""
+
+    def _record_dialectic_success(self) -> None:
+        """Reset the failure counter and stamp a success timestamp."""
+        self._dialectic_failure_count = 0
+        self._dialectic_last_success_at = datetime.now().isoformat()
+
+    def _record_dialectic_failure(self, status: int | None, detail: str) -> None:
+        """Increment the failure counter; escalate log if threshold crossed."""
+        self._dialectic_failure_count += 1
+        self._dialectic_last_failure = {
+            "at": datetime.now().isoformat(),
+            "status": status,
+            "detail": detail[:500],
+        }
+        if self._dialectic_failure_count >= self._dialectic_escalation_threshold:
+            logger.error(
+                "Honcho dialectic DEGRADED: %d consecutive failures. "
+                "Last: %s. Hermes will keep responding but without "
+                "dialectic context until the provider recovers.",
+                self._dialectic_failure_count,
+                detail[:200],
+            )
+
+    def dialectic_health(self) -> dict[str, Any]:
+        """
+        Snapshot of the dialectic subsystem health.
+
+        Intended to be consumed by monitoring (NATS heartbeats to
+        agent.hermes, dashboards, alerts). The degraded flag flips
+        once consecutive failures cross the escalation threshold.
+
+        Returns:
+            {
+                "degraded": bool,
+                "consecutive_failures": int,
+                "escalation_threshold": int,
+                "last_failure": {"at": iso, "status": int|None,
+                                 "detail": str} | None,
+                "last_success_at": iso | None,
+            }
+        """
+        return {
+            "degraded": (
+                self._dialectic_failure_count
+                >= self._dialectic_escalation_threshold
+            ),
+            "consecutive_failures": self._dialectic_failure_count,
+            "escalation_threshold": self._dialectic_escalation_threshold,
+            "last_failure": self._dialectic_last_failure,
+            "last_success_at": self._dialectic_last_success_at,
+        }
 
     def prefetch_dialectic(self, session_key: str, query: str) -> None:
         """
