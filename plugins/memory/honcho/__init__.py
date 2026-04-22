@@ -293,6 +293,14 @@ class HonchoMemoryProvider(MemoryProvider):
                 logger.debug("Honcho not configured — plugin inactive")
                 return
 
+            # Override peer_name with gateway user_id for per-user memory scoping.
+            # Only when no explicit peerName was configured — an explicit peerName
+            # means the user chose their identity; a raw user_id (e.g. Telegram
+            # chat ID) should not silently replace it.
+            _gw_user_id = kwargs.get("user_id")
+            if _gw_user_id and not cfg.peer_name:
+                cfg.peer_name = _gw_user_id
+
             self._config = cfg
 
             # ----- B1: recall_mode from config -----
@@ -325,7 +333,9 @@ class HonchoMemoryProvider(MemoryProvider):
             # ----- Port #1957: lazy session init for tools-only mode -----
             if self._recall_mode == "tools":
                 if cfg.init_on_session_start:
-                    # Eager init even in tools mode (opt-in)
+                    # Eager init: create session now so sync_turn() works from turn 1.
+                    # Does NOT enable auto-injection — prefetch() still returns empty.
+                    logger.debug("Honcho tools-only mode — eager session init (initOnSessionStart=true)")
                     self._do_session_init(cfg, session_id, **kwargs)
                     return
                 # Defer actual session creation until first tool call
@@ -1183,6 +1193,14 @@ class HonchoMemoryProvider(MemoryProvider):
                 )
                 # Update cadence tracker so auto-injection respects the gap after an explicit call
                 self._last_dialectic_turn = self._turn_count
+                if peer == "user":
+                    conclusion_hits = self._manager.query_conclusions(self._session_key, query, top_k=5)
+                    if conclusion_hits:
+                        snippets = "\n".join(f"- {item}" for item in conclusion_hits)
+                        if result:
+                            result = f"{result}\n\nRelevant recent conclusions:\n{snippets}"
+                        else:
+                            result = f"Relevant recent conclusions:\n{snippets}"
                 return json.dumps({"result": result or "No result from Honcho."})
 
             elif tool_name == "honcho_context":

@@ -988,9 +988,50 @@ class HonchoSessionManager:
 
         try:
             observer_peer_id, target_peer_id = self._resolve_observer_target(session, peer)
-            return self._fetch_peer_card(observer_peer_id, target=target_peer_id)
+            card = self._fetch_peer_card(observer_peer_id, target=target_peer_id)
+            recent = self.list_recent_conclusions(session_key, limit=8)
+            merged: list[str] = []
+            for item in [*(card or []), *recent]:
+                normalized = str(item or "").strip()
+                if normalized and normalized not in merged:
+                    merged.append(normalized)
+            return merged
         except Exception as e:
             logger.debug("Failed to fetch peer card from Honcho: %s", e)
+            return []
+
+    def _get_conclusions_scope(self, session_key: str):
+        session = self._cache.get(session_key)
+        if not session:
+            return None
+        if self._ai_observe_others:
+            assistant_peer = self._get_or_create_peer(session.assistant_peer_id)
+            return assistant_peer.conclusions_of(session.user_peer_id)
+        user_peer = self._get_or_create_peer(session.user_peer_id)
+        return user_peer.conclusions_of(session.user_peer_id)
+
+    def list_recent_conclusions(self, session_key: str, limit: int = 10) -> list[str]:
+        """Return recent conclusions for the active observer/observed pair."""
+        try:
+            scope = self._get_conclusions_scope(session_key)
+            if scope is None:
+                return []
+            page = scope.list(size=limit)
+            return [item.content.strip() for item in page.items if getattr(item, "content", "").strip()]
+        except Exception as e:
+            logger.debug("Honcho list_recent_conclusions failed: %s", e)
+            return []
+
+    def query_conclusions(self, session_key: str, query: str, top_k: int = 5) -> list[str]:
+        """Semantic search over conclusions for immediate-consistency recall."""
+        try:
+            scope = self._get_conclusions_scope(session_key)
+            if scope is None:
+                return []
+            results = scope.query(query, top_k=top_k)
+            return [item.content.strip() for item in results if getattr(item, "content", "").strip()]
+        except Exception as e:
+            logger.debug("Honcho query_conclusions failed: %s", e)
             return []
 
     def search_context(
@@ -1029,12 +1070,17 @@ class HonchoSessionManager:
                 target=target,
             )
             parts = []
+            top_k = max(3, min(8, max_tokens // 160))
+            conclusion_hits = self.query_conclusions(session_key, query, top_k=top_k)
+            if conclusion_hits:
+                parts.append("\n".join(f"- {item}" for item in conclusion_hits))
+            ctx = self._fetch_peer_context(session.user_peer_id, search_query=query)
             if ctx["representation"]:
                 parts.append(ctx["representation"])
             card = ctx["card"] or []
             if card:
                 parts.append("\n".join(f"- {f}" for f in card))
-            return "\n\n".join(parts)
+            return "\n\n".join(part for part in parts if part)
         except Exception as e:
             logger.debug("Honcho search_context failed: %s", e)
             return ""
