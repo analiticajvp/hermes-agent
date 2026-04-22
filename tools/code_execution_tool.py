@@ -914,8 +914,33 @@ _BUS_LEGACY_PATTERNS = [
     _re_bus_guard.compile(r'["\'](?:CODEX|HERMES-VPS)["\']'),
 ]
 
+# Drift patterns — LLMs (esp. MiniMax) sometimes try to call send_bus_message
+# as if it were a Python import or helper inside execute_code. It is NOT:
+# it is a top-level Hermes tool and must be invoked directly, not from the
+# sandbox. The stub module `hermes_tools.py` generated for the sandbox
+# deliberately omits send_bus_message (see SANDBOX_ALLOWED_TOOLS), so these
+# imports/calls fail with ImportError or NameError. Reject early with a
+# helpful message so the model corrects course on the next turn.
+_BUS_DRIFT_PATTERNS = [
+    _re_bus_guard.compile(
+        r'from\s+hermes_tools\s+import\b[^\n]*\bsend_bus_message\b'
+    ),
+    _re_bus_guard.compile(r'^\s*import\s+hermes_tools\b', _re_bus_guard.MULTILINE),
+    _re_bus_guard.compile(r'\bhermes_tools\s*\.\s*send_bus_message\b'),
+    _re_bus_guard.compile(r'(?<![\'"\w.])send_bus_message\s*\('),
+]
 
-def _check_bus_publish_pattern(code: str):
+_BUS_DRIFT_HINT = (
+    "`send_bus_message` is a DIRECT Hermes tool call, NOT a Python import. "
+    "It is deliberately NOT available inside execute_code sandbox. "
+    "Invoke it as a tool directly in your next turn — do not write Python "
+    "code that imports or calls it. Example (tool call, not Python): "
+    "send_bus_message(to='HALL9000', body='[tarea] ...', task_id='...'). "
+    "Valid peers: HALL9000, PI, HERMES, ALL."
+)
+
+
+def _check_bus_publish_pattern(code: str) -> str | None:
     for rx in _BUS_LEGACY_PATTERNS:
         m = rx.search(code)
         if m:
@@ -929,6 +954,16 @@ def _check_bus_publish_pattern(code: str):
                 "shape. Use the send_bus_message tool instead: "
                 "send_bus_message(to='HALL9000', body='...', task_id='...'). "
                 "Valid peers: HALL9000, PI, HERMES, ALL. NOT CODEX, NOT HERMES-VPS."
+            )
+    for rx in _BUS_DRIFT_PATTERNS:
+        m = rx.search(code)
+        if m:
+            start = max(0, m.start() - 30)
+            snippet = code[start:m.end() + 30]
+            return (
+                "Code rejected by bus-drift guard: matched "
+                f"pattern {m.re.pattern!r} near {snippet!r}. "
+                f"{_BUS_DRIFT_HINT}"
             )
     return None
 # --- end bus-publish guard ------------------------------------------------
