@@ -8,6 +8,7 @@ import hashlib
 import logging
 import os
 import shlex
+import signal
 import socket
 import subprocess
 import sys
@@ -703,10 +704,124 @@ async def handle_message(msg: dict[str, Any]) -> None:
         raise
 
 
+# --- Graceful shutdown support ---
+# The listener runs as a long-lived process inside the hermes-agent
+# container, supervised by ensure_nats_auto_ack_listener.sh. When the
+# supervisor sends SIGTERM (code sync, restart, etc.) we want to:
+#   1) stop accepting new bus messages,
+#   2) drain in-flight handlers within a configurable grace period,
+#   3) close the NATS connection cleanly,
+# so we never lose a [RESULT] mid-flight just because the supervisor
+# ticked. Without this, long tasks (model_review via LLM) get abruptly
+# killed after 8s and the caller sees ACK without RESULT.
+
+_SHUTDOWN_GRACE_S = float(os.environ.get("LISTENER_SHUTDOWN_GRACE_S", "60"))
+_in_flight: set[asyncio.Task] = set()
+
+
+def _track_in_flight(task: asyncio.Task) -> None:
+    _in_flight.add(task)
+    task.add_done_callback(_in_flight.discard)
+
+
+def _register_signal_handlers(
+    loop: asyncio.AbstractEventLoop,
+    shutdown_event: asyncio.Event,
+) -> None:
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            loop.add_signal_handler(sig, shutdown_event.set)
+        except NotImplementedError:
+            # Windows / constrained runtimes — fall back silently.
+            pass
+
+
+async def _drain_in_flight(grace_seconds: float) -> int:
+    if not _in_flight:
+        return 0
+    log.info(
+        "shutdown: draining %d in-flight task(s), grace=%.1fs",
+        len(_in_flight),
+        grace_seconds,
+    )
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(*_in_flight, return_exceptions=True),
+            timeout=grace_seconds,
+        )
+    except asyncio.TimeoutError:
+        survivors = len(_in_flight)
+        log.warning(
+            "shutdown: %d task(s) still running after %.1fs grace — exiting anyway",
+            survivors,
+            grace_seconds,
+        )
+        return survivors
+    log.info("shutdown: all in-flight tasks completed cleanly")
+    return 0
+
+
+async def _safe_heartbeat(doing: str, extra: dict[str, Any] | None = None) -> None:
+    try:
+        await _heartbeat(doing, extra)
+    except Exception as exc:  # Heartbeat failure must not block shutdown.
+        log.debug("shutdown: heartbeat '%s' failed: %s", doing, exc)
+
+
+async def _graceful_shutdown(listener_task: asyncio.Task) -> None:
+    log.info("shutdown: signal received, stopping listener")
+    await _safe_heartbeat(
+        "🟡 listener Hermes deteniendo (graceful)",
+        {"grace_s": _SHUTDOWN_GRACE_S, "in_flight": len(_in_flight)},
+    )
+    # Step 1: drain NATS connection FIRST so no new messages feed
+    # _dispatch_tracked during the grace period. drain() unsubscribes
+    # cleanly and lets in-flight callbacks finish before closing.
+    try:
+        from nats_bus import close as _nats_close
+
+        await _nats_close()
+    except Exception as exc:
+        log.warning("shutdown: nats close failed: %s", exc)
+    # Step 2: now it is safe to cancel the listener's keepalive loop.
+    listener_task.cancel()
+    try:
+        await listener_task
+    except asyncio.CancelledError:
+        pass
+    except Exception as exc:
+        log.warning("shutdown: listener task exited with error: %s", exc)
+    # Step 3: drain the handlers that were already running.
+    survivors = await _drain_in_flight(_SHUTDOWN_GRACE_S)
+    await _safe_heartbeat("🔻 listener Hermes apagado", {"survivors": survivors})
+    log.info("shutdown: exit clean (survivors=%d)", survivors)
+
+
+def _dispatch_tracked(msg: dict[str, Any]) -> None:
+    task = asyncio.create_task(handle_message(msg))
+    _track_in_flight(task)
+
+
 async def main() -> None:
     log.info("Starting Hermes NATS auto-ACK listener")
-    await _heartbeat("🟢 listener Hermes iniciado", {"nats_url": NATS_URL})
-    await start_listener(lambda msg: asyncio.create_task(handle_message(msg)))
+    await _heartbeat(
+        "🟢 listener Hermes iniciado",
+        {"nats_url": NATS_URL, "shutdown_grace_s": _SHUTDOWN_GRACE_S},
+    )
+    loop = asyncio.get_running_loop()
+    shutdown_event = asyncio.Event()
+    _register_signal_handlers(loop, shutdown_event)
+    listener_task = asyncio.create_task(start_listener(_dispatch_tracked))
+    shutdown_waiter = asyncio.create_task(shutdown_event.wait())
+    try:
+        done, pending = await asyncio.wait(
+            {listener_task, shutdown_waiter},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for task in pending:
+            task.cancel()
+    finally:
+        await _graceful_shutdown(listener_task)
 
 
 if __name__ == "__main__":
