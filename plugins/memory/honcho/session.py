@@ -559,7 +559,24 @@ class HonchoSessionManager:
                 result = result[:self._dialectic_max_chars].rsplit(" ", 1)[0] + " …"
             return result
         except Exception as e:
-            logger.warning("Honcho dialectic query failed: %s", e)
+            # Surface HTTP status + body when the SDK exposes them.
+            # Generic str(e) from honcho-ai SDK often collapses to
+            # "An unexpected error occurred" which hides 402/4xx/5xx.
+            response = getattr(e, "response", None)
+            status = getattr(response, "status_code", None)
+            body = getattr(response, "text", None)
+            if status is not None:
+                logger.warning(
+                    "Honcho dialectic query failed: HTTP %s — %s",
+                    status,
+                    (body or "")[:300],
+                )
+            else:
+                logger.exception(
+                    "Honcho dialectic query failed (unhandled): %s (%s)",
+                    e,
+                    type(e).__name__,
+                )
             return ""
 
     def prefetch_context(self, session_key: str, user_message: str | None = None) -> None:
