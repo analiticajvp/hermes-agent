@@ -172,6 +172,9 @@ class MessageContext:
     from_agent: str | None
     task_id: str | None
     task_payload: TaskPayload
+    msg_id: str | None = None
+    correlation_id: str | None = None
+    protocol_version: str | None = None
 
 
 @dataclass(frozen=True)
@@ -210,6 +213,9 @@ def _message_context(msg: dict[str, Any]) -> MessageContext:
         from_agent=msg.get("from_agent"),
         task_id=msg.get("task_id"),
         task_payload=_parse_task_payload(msg.get("task_payload")),
+        msg_id=msg.get("msg_id"),
+        correlation_id=msg.get("correlation_id") or msg.get("task_id"),
+        protocol_version=msg.get("protocol_version"),
     )
 
 
@@ -557,8 +563,25 @@ def run_action(
             return "[RESULT] Tarea no soportada por executor Hermes."
 
 
+def _structured_reply_kwargs(context: MessageContext, message_kind: str) -> dict[str, Any]:
+    if context.protocol_version != "1.1":
+        return {}
+    return {
+        "protocol_version": "1.1",
+        "message_kind": message_kind,
+        "correlation_id": context.correlation_id,
+        "causation_id": context.msg_id,
+        "reply_to_msg_id": context.msg_id,
+    }
+
+
 async def _publish_result(context: MessageContext, result: str) -> None:
-    await publish(result, to=context.from_agent or "ALL", task_id=context.task_id)
+    await publish(
+        result,
+        to=context.from_agent or "ALL",
+        task_id=context.task_id,
+        **_structured_reply_kwargs(context, "result"),
+    )
 
 
 async def _send_ack(context: MessageContext) -> None:
@@ -569,7 +592,12 @@ async def _send_ack(context: MessageContext) -> None:
             "from": context.from_agent,
         },
     )
-    await publish("Recibido", to=context.from_agent or "ALL", task_id=context.task_id)
+    await publish(
+        "Recibido",
+        to=context.from_agent or "ALL",
+        task_id=context.task_id,
+        **_structured_reply_kwargs(context, "ack"),
+    )
     await _heartbeat(
         "🤝 ACK enviado",
         {

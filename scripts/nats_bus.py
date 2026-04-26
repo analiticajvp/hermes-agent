@@ -159,8 +159,17 @@ def _build_envelope(
     task_id: str | None = None,
     task_type: str | None = None,
     task_payload: dict[str, Any] | None = None,
+    *,
+    message_kind: str | None = None,
+    correlation_id: str | None = None,
+    causation_id: str | None = None,
+    reply_to_msg_id: str | None = None,
+    protocol_version: str | None = None,
+    expected_output: str | None = None,
+    intent: str | None = None,
+    context_digest: list[dict[str, Any]] | None = None,
 ) -> bytes:
-    """Build a JSON message envelope."""
+    """Build a JSON message envelope with optional AGENT_BUS v1.1 fields."""
 
     envelope = {
         "from_agent": SELF_NAME,
@@ -172,6 +181,17 @@ def _build_envelope(
         "msg_id": str(uuid.uuid4())[:8],
         "ts": time.time(),
     }
+    optional_fields = {
+        "protocol_version": protocol_version,
+        "message_kind": message_kind,
+        "correlation_id": correlation_id,
+        "causation_id": causation_id,
+        "reply_to_msg_id": reply_to_msg_id,
+        "expected_output": expected_output,
+        "intent": intent,
+        "context_digest": context_digest,
+    }
+    envelope.update({key: value for key, value in optional_fields.items() if value is not None})
     return json.dumps(envelope, ensure_ascii=False).encode()
 
 
@@ -219,12 +239,15 @@ def is_ack_like(text: str | None) -> bool:
 def should_auto_ack(msg: dict[str, Any]) -> bool:
     """Guard for Hermes auto-reply listeners.
 
-    Auto-ACK is allowed only for non-echo, addressed messages
-    whose body is not already a trivial ACK.
+    Auto-ACK is allowed only for non-echo, addressed request/legacy messages.
+    Structured ACK/PROGRESS/RESULT/ERROR/UNSUPPORTED are replies, not tasks.
     """
     if _is_echo(msg):
         return False
     if not _is_for_me(msg):
+        return False
+    message_kind = msg.get("message_kind")
+    if message_kind in {"ack", "progress", "result", "error", "unsupported"}:
         return False
     if has_control_prefix(msg.get("body")):
         return False
@@ -246,6 +269,15 @@ async def publish(
     task_id: str | None = None,
     task_type: str | None = None,
     task_payload: dict[str, Any] | None = None,
+    *,
+    message_kind: str | None = None,
+    correlation_id: str | None = None,
+    causation_id: str | None = None,
+    reply_to_msg_id: str | None = None,
+    protocol_version: str | None = None,
+    expected_output: str | None = None,
+    intent: str | None = None,
+    context_digest: list[dict[str, Any]] | None = None,
 ) -> None:
     """Publish a message to agent.bus."""
     _validate_publish_request(body, to, task_id, task_type)
@@ -256,16 +288,33 @@ async def publish(
         task_id=task_id,
         task_type=task_type,
         task_payload=task_payload,
+        message_kind=message_kind,
+        correlation_id=correlation_id,
+        causation_id=causation_id,
+        reply_to_msg_id=reply_to_msg_id,
+        protocol_version=protocol_version,
+        expected_output=expected_output,
+        intent=intent,
+        context_digest=context_digest,
     )
     await nc.publish(SUBJECT, payload)
     log.info("Published to %s: to=%s task=%s type=%s body=%s", *_publish_log_payload(body, to, task_id, task_type))
 
 
-def _matches_waiting_message(msg: dict[str, Any], to: str, task_id: str) -> bool:
+def _matches_waiting_message(
+    msg: dict[str, Any],
+    to: str,
+    task_id: str,
+    correlation_id: str | None = None,
+) -> bool:
     if msg.get("from_agent") != to:
         return False
     if msg.get("to") not in (SELF_NAME, "ALL"):
         return False
+    if correlation_id:
+        msg_correlation_id = msg.get("correlation_id")
+        if msg_correlation_id:
+            return msg_correlation_id == correlation_id
     return msg.get("task_id") == task_id
 
 
@@ -274,9 +323,10 @@ async def _queue_matching_reply(
     queue: asyncio.Queue[dict[str, Any]],
     to: str,
     task_id: str,
+    correlation_id: str | None = None,
 ) -> None:
     msg = _parse_envelope(raw_msg.data)
-    if msg is None or not _matches_waiting_message(msg, to, task_id):
+    if msg is None or not _matches_waiting_message(msg, to, task_id, correlation_id):
         return
     await queue.put(msg)
 
@@ -286,11 +336,20 @@ async def _subscribe_for_replies(
     queue: asyncio.Queue[dict[str, Any]],
     to: str,
     task_id: str,
+    correlation_id: str | None = None,
 ):
     async def _handler(raw_msg: Any) -> None:
-        await _queue_matching_reply(raw_msg, queue, to, task_id)
+        await _queue_matching_reply(raw_msg, queue, to, task_id, correlation_id)
 
     return await nc.subscribe(SUBJECT, cb=_handler)
+
+
+def _is_non_final_message_kind(message_kind: object) -> bool:
+    return message_kind in {"ack", "progress"}
+
+
+def _is_final_message_kind(message_kind: object) -> bool:
+    return message_kind in {"result", "error", "unsupported"}
 
 
 def _collect_reply_state(
@@ -299,8 +358,13 @@ def _collect_reply_state(
     result_body: str | None,
 ) -> tuple[str | None, str | None, bool]:
     incoming_body = str(msg.get("body", ""))
-    if is_ack_like(incoming_body) and ack_body is None:
+    message_kind = msg.get("message_kind")
+    if message_kind == "ack" or (is_ack_like(incoming_body) and ack_body is None):
         return incoming_body, result_body, False
+    if _is_non_final_message_kind(message_kind):
+        return ack_body, result_body, False
+    if _is_final_message_kind(message_kind):
+        return ack_body, incoming_body, True
     if has_control_prefix(incoming_body) or result_body is None:
         return ack_body, incoming_body, has_control_prefix(incoming_body)
     return ack_body, result_body, False
@@ -342,14 +406,34 @@ async def send_and_wait_bus_message(
     timeout_s: float = DEFAULT_WAIT_TIMEOUT_S,
     task_type: str | None = None,
     task_payload: dict[str, Any] | None = None,
+    *,
+    correlation_id: str | None = None,
+    message_kind: str | None = None,
+    protocol_version: str | None = None,
+    expected_output: str | None = None,
+    intent: str | None = None,
+    context_digest: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Publish to agent.bus and wait for ACK/RESULT correlated by task_id."""
+    """Publish to agent.bus and wait for ACK/RESULT by task_id or correlation_id."""
     _validate_publish_request(body, to, task_id, task_type)
     nc = await _get_client()
     queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
-    sub = await _subscribe_for_replies(nc, queue, to, task_id)
+    effective_correlation_id = correlation_id or (task_id if message_kind == "request" or protocol_version == "1.1" else None)
+    sub = await _subscribe_for_replies(nc, queue, to, task_id, effective_correlation_id)
     try:
-        await publish(body, to=to, task_id=task_id, task_type=task_type, task_payload=task_payload)
+        await publish(
+            body,
+            to=to,
+            task_id=task_id,
+            task_type=task_type,
+            task_payload=task_payload,
+            message_kind=message_kind,
+            correlation_id=effective_correlation_id,
+            protocol_version=protocol_version,
+            expected_output=expected_output,
+            intent=intent,
+            context_digest=context_digest,
+        )
         ack_body, result_body = await _wait_for_reply_bodies(queue, timeout_s)
         return _reply_summary(task_id, ack_body, result_body)
     finally:
