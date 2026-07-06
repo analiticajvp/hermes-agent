@@ -234,11 +234,11 @@ function normalizeAnsiForeground(color: string): string {
 // ── Defaults ─────────────────────────────────────────────────────────
 
 const BRAND: ThemeBrand = {
-  name: 'Hermes Agent',
-  icon: '⚕',
+  name: process.env.DARWIN_BRAND_NAME || 'Hermes Agent',
+  icon: process.env.DARWIN_BRAND_ICON || '⚕',
   prompt: '❯',
-  welcome: 'Type your message or /help for commands.',
-  goodbye: 'Goodbye! ⚕',
+  welcome: process.env.DARWIN_BRAND_WELCOME || 'Type your message or /help for commands.',
+  goodbye: process.env.DARWIN_BRAND_GOODBYE || 'Goodbye! ⚕',
   tool: '┊',
   helpHeader: '(^_^)? Commands'
 }

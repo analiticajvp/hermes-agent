@@ -24,6 +24,7 @@ import { getUiState } from './uiStore.js'
 
 const PASTE_SNIP_MAX_COUNT = 32
 const PASTE_SNIP_MAX_TOTAL_BYTES = 4 * 1024 * 1024
+const DISABLE_TUI_CLIPBOARD_READ = process.env.HERMES_TUI_DISABLE_CLIPBOARD_READ === '1'
 
 const trimSnips = (snips: PasteSnippet[]): PasteSnippet[] => {
   let total = 0
@@ -144,7 +145,7 @@ export function useComposerState({
       const cleanedText = stripTrailingPasteNewlines(text)
 
       if (!cleanedText || !/[^\n]/.test(cleanedText)) {
-        if (bracketed) {
+        if (bracketed && !DISABLE_TUI_CLIPBOARD_READ) {
           void onClipboardPaste(true)
         }
 
@@ -233,6 +234,10 @@ export function useComposerState({
       value
     }: PasteEvent): MaybePromise<null | { cursor: number; value: string }> => {
       if (hotkey) {
+        if (DISABLE_TUI_CLIPBOARD_READ) {
+          return null
+        }
+
         const preferOsc52 = isRemoteShellSession(process.env)
 
         const readPreferredText = preferOsc52
