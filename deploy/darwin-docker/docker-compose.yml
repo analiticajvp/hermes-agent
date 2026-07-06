@@ -1,0 +1,70 @@
+name: localhermes-darwin
+
+services:
+  darwin:
+    image: localhermes-darwin:0.18.0
+    build:
+      context: ../../src
+      dockerfile: Dockerfile.darwin
+    network_mode: host
+    stdin_open: true
+    tty: true
+    user: "${DARWIN_UID:-1000}:${DARWIN_GID:-1000}"
+    working_dir: /workspace
+    environment:
+      HERMES_HOME: /data/hermes
+      HOME: /data/hermes
+      DARWIN_PROFILE: "${DARWIN_PROFILE:-default}"
+      DARWIN_SERVER_NAME: "Server Alemán / Hetzner (ubuntu-8gb-fsn1-2)"
+      DARWIN_BRAND_NAME: "Darwin"
+      DARWIN_BRAND_ICON: "◆"
+      DARWIN_BRAND_WELCOME: "Darwin en Server Alemán listo. /help para comandos."
+      DARWIN_BRAND_GOODBYE: "Darwin offline."
+      DARWIN_BRAND_TAG_FULL: "Server Alemán · comparte Honcho + Engram con Hermes OVH"
+      DARWIN_BRAND_TAG_MID: "Server Alemán · Honcho + Engram OVH"
+      DARWIN_BRAND_TAG_TINY: "Hetzner"
+      DARWIN_BRAND_ORG: "Server Alemán"
+      ENGRAM_HTTP_URL: "http://100.92.211.3:17437"
+      HERMES_TUI_DISABLE_MOUSE: "1"
+      HERMES_TUI_MOUSE_TRACKING: "0"
+      HERMES_TUI_DISABLE_CLIPBOARD_READ: "1"
+      TERM: "${TERM:-xterm-256color}"
+      COLORTERM: "${COLORTERM:-truecolor}"
+    volumes:
+      - ../../home:/data/hermes
+      - ../../server-workspace:/workspace
+
+  # Optional long-running gateway. Start manually with:
+  #   docker compose --profile gateway up -d darwin-gateway
+  darwin-gateway:
+    profiles: ["gateway"]
+    image: localhermes-darwin:0.18.0
+    build:
+      context: ../../src
+      dockerfile: Dockerfile.darwin
+    network_mode: host
+    restart: unless-stopped
+    user: "${DARWIN_UID:-1000}:${DARWIN_GID:-1000}"
+    environment:
+      HERMES_HOME: /data/hermes
+      HOME: /data/hermes
+      DARWIN_PROFILE: "${DARWIN_PROFILE:-default}"
+      DARWIN_SERVER_NAME: "Server Alemán / Hetzner (ubuntu-8gb-fsn1-2)"
+      DARWIN_BRAND_NAME: "Darwin"
+      DARWIN_BRAND_ICON: "◆"
+      DARWIN_BRAND_WELCOME: "Darwin gateway en Server Alemán listo."
+      DARWIN_BRAND_GOODBYE: "Darwin gateway offline."
+      DARWIN_BRAND_TAG_FULL: "Server Alemán · comparte Honcho + Engram con Hermes OVH"
+      DARWIN_BRAND_TAG_MID: "Server Alemán · Honcho + Engram OVH"
+      DARWIN_BRAND_TAG_TINY: "Hetzner"
+      DARWIN_BRAND_ORG: "Server Alemán"
+      ENGRAM_HTTP_URL: "http://100.92.211.3:17437"
+      HERMES_TUI_DISABLE_MOUSE: "1"
+      HERMES_TUI_MOUSE_TRACKING: "0"
+      HERMES_TUI_DISABLE_CLIPBOARD_READ: "1"
+      TERM: xterm-256color
+      COLORTERM: truecolor
+    volumes:
+      - ../../home:/data/hermes
+      - ../../server-workspace:/workspace
+    command: ["gateway", "run", "--replace"]

@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${DARWIN_ROOT:-/home/juan/LocalHermes}"
+COMPOSE_FILE="$ROOT/deploy/darwin-docker/docker-compose.yml"
+IMAGE="localhermes-darwin:0.18.0"
+
+if ! command -v docker >/dev/null 2>&1; then
+  echo "Darwin: docker no está instalado o no está en PATH." >&2
+  exit 127
+fi
+
+mkdir -p "$ROOT/server-workspace" "$ROOT/home"
+export DARWIN_UID="${DARWIN_UID:-$(id -u)}"
+export DARWIN_GID="${DARWIN_GID:-$(id -g)}"
+
+if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
+  echo "[Darwin] Imagen $IMAGE no existe; construyendo..." >&2
+  docker compose -f "$COMPOSE_FILE" build darwin
+fi
+
+run_opts=(--rm)
+if [ ! -t 0 ] || [ ! -t 1 ]; then
+  run_opts+=(-T)
+fi
+
+exec docker compose -f "$COMPOSE_FILE" run "${run_opts[@]}" darwin "$@"
