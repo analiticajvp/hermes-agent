@@ -93,6 +93,12 @@ if ! _check_honcho_shared_memory; then
   echo "[Darwin/docker] WARNING: Honcho compartido no disponible; continúo con memoria local (state.db/MEMORY.md/USER.md)." >&2
 fi
 
+if [ "$#" -gt 0 ] && [ -x "$HERMES_HOME/bin/$1" ]; then
+  tool="$HERMES_HOME/bin/$1"
+  shift
+  exec "$tool" "$@"
+fi
+
 if [ "$#" -eq 0 ]; then
   exec hermes -p "${DARWIN_PROFILE:-default}" --tui
 fi
