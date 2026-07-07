@@ -27,6 +27,12 @@ RUN ln -sf /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
     && ln -sf /usr/local/lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
     && ln -sf /usr/local/lib/node_modules/corepack/dist/corepack.js /usr/local/bin/corepack
 
+# Compose runs Darwin as uid/gid 1000 so mounted knowledge files stay owned by
+# the host operator.  Some tools (notably OpenSSH) require that uid to resolve
+# through passwd/group, even when HOME is provided by the environment.
+RUN grep -q '^darwin:' /etc/group || printf 'darwin:x:1000:\n' >> /etc/group \
+    && grep -q '^darwin:' /etc/passwd || printf 'darwin:x:1000:1000:Darwin:/data/hermes:/bin/bash\n' >> /etc/passwd
+
 WORKDIR /opt/darwin/src
 
 # Copy full source only. Build context is LocalHermes/src, so HERMES_HOME secrets are out of scope.

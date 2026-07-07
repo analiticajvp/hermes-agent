@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "Darwin server access check"
+echo "=========================="
+echo "local_container=$(hostname) user=$(id -un 2>/dev/null || id -u) uid=$(id -u) home=$HOME"
+echo
+
+check_ssh() {
+  local name="$1"
+  shift
+  echo "--- $name ---"
+  if ssh -o BatchMode=yes -o ConnectTimeout=8 "$@" 'printf "ok host=%s user=%s pwd=%s\n" "$(hostname)" "$(whoami)" "$PWD"'; then
+    echo "$name=OK"
+  else
+    echo "$name=FAIL"
+    return 1
+  fi
+}
+
+status=0
+check_ssh "server-aleman" server-aleman || status=1
+check_ssh "ovh" ovh || status=1
+
+echo
+echo "--- memory endpoints ---"
+python - <<'PY' || status=1
+import urllib.request
+
+for name, url in [
+    ("honcho-ovh", "http://100.92.211.3:18800/openapi.json"),
+    ("engram-ovh", "http://100.92.211.3:17437/health"),
+]:
+    try:
+        with urllib.request.urlopen(url, timeout=5) as r:
+            print(f"{name}=OK status={r.status}")
+    except Exception as exc:
+        print(f"{name}=FAIL {exc}")
+        raise
+PY
+
+exit "$status"

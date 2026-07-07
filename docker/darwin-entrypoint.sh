@@ -5,6 +5,7 @@ export HERMES_HOME="${HERMES_HOME:-/data/hermes}"
 export HOME="${HOME:-$HERMES_HOME}"
 export PYTHONUNBUFFERED=1
 export PYTHONDONTWRITEBYTECODE=1
+export PATH="$HERMES_HOME/bin:$PATH"
 
 mkdir -p "$HERMES_HOME" "$HOME"
 
